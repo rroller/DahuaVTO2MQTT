@@ -33,6 +33,29 @@ _LOGGER = logging.getLogger(__name__)
 DAHUA_ALLOWED_DETAILS = ["deviceType", "serialNumber"]
 
 
+def access_control_open_door():
+    try:
+        _LOGGER.debug("Access Control - Open door")
+
+        host = os.environ.get('DAHUA_VTO_HOST')
+
+        username = os.environ.get('DAHUA_VTO_USERNAME')
+        password = os.environ.get('DAHUA_VTO_PASSWORD')
+
+        url = f"http://{host}/cgi-bin/accessControl.cgi?action=openDoor&channel=1&UserID=101&Type=Remote"
+
+        response = requests.get(url, auth=HTTPDigestAuth(username, password))
+
+        response.raise_for_status()
+
+        _LOGGER.info("Access Control - Door was opened")
+
+    except Exception as ex:
+        exc_type, exc_obj, exc_tb = sys.exc_info()
+
+        _LOGGER.error(f"Failed to open door, error: {ex}, Line: {exc_tb.tb_lineno}")
+
+
 class DahuaVTOClient(asyncio.Protocol):
     requestId: int
     sessionId: int
@@ -58,6 +81,7 @@ class DahuaVTOClient(asyncio.Protocol):
         self.mqtt_broker_password = os.environ.get('MQTT_BROKER_PASSWORD')
 
         self.mqtt_broker_topic_prefix = os.environ.get('MQTT_BROKER_TOPIC_PREFIX')
+        self.mqtt_open_door_topic = f"{self.mqtt_broker_topic_prefix}/Command/Open"
 
         self.realm = None
         self.random = None
@@ -86,9 +110,19 @@ class DahuaVTOClient(asyncio.Protocol):
     def on_mqtt_connect(client, userdata, flags, rc):
         _LOGGER.info(f"MQTT Broker connected with result code {rc}")
 
+        mqtt_broker_topic_prefix = os.environ.get('MQTT_BROKER_TOPIC_PREFIX')
+        mqtt_open_door_topic = f"{mqtt_broker_topic_prefix}/Command/Open"
+        client.subscribe(mqtt_open_door_topic)
+
     @staticmethod
     def on_mqtt_message(client, userdata, msg):
-        _LOGGER.info(f"MQTT Message {msg.topic}: {msg.payload}")
+        _LOGGER.debug(f"MQTT Message {msg.topic}: {msg.payload}")
+
+        mqtt_broker_topic_prefix = os.environ.get('MQTT_BROKER_TOPIC_PREFIX')
+        mqtt_open_door_topic = f"{mqtt_broker_topic_prefix}/Command/Open"
+
+        if msg.topic == mqtt_open_door_topic:
+            access_control_open_door()
 
     @staticmethod
     def on_mqtt_disconnect(client, userdata, rc):
@@ -198,6 +232,11 @@ class DahuaVTOClient(asyncio.Protocol):
 
             self.attach_event_manager()
 
+    def eof_received(self):
+        _LOGGER.info('Server sent EOF message')
+
+        self._loop.stop()
+
     def connection_lost(self, exc):
         _LOGGER.error('server closed the connection')
 
@@ -208,7 +247,8 @@ class DahuaVTOClient(asyncio.Protocol):
 
         message_data.id = self.request_id
 
-        self.transport.write(message_data.to_message())
+        if not self.transport.is_closing():
+            self.transport.write(message_data.to_message())
 
     def pre_login(self):
         _LOGGER.debug("Prepare pre-login message")
@@ -216,7 +256,8 @@ class DahuaVTOClient(asyncio.Protocol):
         message_data = MessageData(self.request_id, self.sessionId)
         message_data.login(self.username)
 
-        self.transport.write(message_data.to_message())
+        if not self.transport.is_closing():
+            self.transport.write(message_data.to_message())
 
     def login(self):
         _LOGGER.debug("Prepare login message")
@@ -317,14 +358,17 @@ class DahuaVTOManager:
                 loop.run_forever()
                 loop.close()
 
-                _LOGGER.warning("Disconnected, will try to connect in 30 seconds")
+                _LOGGER.warning("Disconnected, will try to connect in 5 seconds")
+
+                sleep(5)
 
             except Exception as ex:
                 exc_type, exc_obj, exc_tb = sys.exc_info()
+                line = exc_tb.tb_lineno
 
-                _LOGGER.error(f"Connection failed, error: {ex}, Line: {exc_tb.tb_lineno}")
+                _LOGGER.error(f"Connection failed will try to connect in 30 seconds, error: {ex}, Line: {line}")
 
-            sleep(30)
+                sleep(30)
 
 
 manager = DahuaVTOManager()
